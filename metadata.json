@@ -1,0 +1,5 @@
+{
+  "name": "StracePerfDiff",
+  "description": "A smart performance visualizer and diff tool for analyzing strace outputs from different machines.",
+  "requestFramePermissions": []
+}

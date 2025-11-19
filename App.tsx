@@ -3,6 +3,7 @@ import { Activity, Zap, BarChart2, ChevronDown, ChevronUp } from 'lucide-react';
 import { FileUpload } from './components/FileUpload';
 import { SummaryCard } from './components/SummaryCard';
 import { DiffViewer } from './components/DiffViewer';
+import { PidSelector } from './components/PidSelector';
 import { parseStrace, alignTraces } from './services/traceService';
 import { ParsedTrace, DiffRow } from './types';
 import {
@@ -22,6 +23,8 @@ const App: React.FC = () => {
   const [diffResult, setDiffResult] = useState<DiffRow[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isChartExpanded, setIsChartExpanded] = useState(true);
+  
+  const [selectedPids, setSelectedPids] = useState<Set<number>>(new Set());
 
   const handleFileA = (content: string, name: string) => {
     const parsed = parseStrace(content, name);
@@ -31,6 +34,46 @@ const App: React.FC = () => {
   const handleFileB = (content: string, name: string) => {
     const parsed = parseStrace(content, name);
     setTraceB(parsed);
+  };
+
+  const resetAll = () => {
+      setTraceA(null);
+      setTraceB(null);
+      setDiffResult([]);
+      setSelectedPids(new Set());
+  };
+
+  // Combine all PIDs when traces are loaded
+  const allPids = useMemo(() => {
+    const set = new Set<number>();
+    if (traceA) traceA.pids.forEach(p => set.add(p));
+    if (traceB) traceB.pids.forEach(p => set.add(p));
+    return Array.from(set).sort((a, b) => a - b);
+  }, [traceA, traceB]);
+
+  // Default select all PIDs when new traces load
+  useEffect(() => {
+    if (allPids.length > 0) {
+      setSelectedPids(new Set(allPids));
+    }
+  }, [allPids]);
+
+  const handlePidToggle = (pid: number) => {
+    const newSet = new Set(selectedPids);
+    if (newSet.has(pid)) {
+      newSet.delete(pid);
+    } else {
+      newSet.add(pid);
+    }
+    setSelectedPids(newSet);
+  };
+
+  const handlePidToggleAll = (select: boolean) => {
+    if (select) {
+      setSelectedPids(new Set(allPids));
+    } else {
+      setSelectedPids(new Set());
+    }
   };
 
   useEffect(() => {
@@ -76,17 +119,21 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-slate-950 text-slate-200 p-6 flex flex-col gap-6">
       {/* Header */}
       <header className="flex items-center justify-between pb-6 border-b border-slate-800">
-        <div className="flex items-center gap-3">
-          <div className="p-3 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-900/20">
+        <button 
+            onClick={resetAll}
+            className="flex items-center gap-3 group transition-opacity hover:opacity-80 cursor-pointer"
+            title="Click to reset and upload new files"
+        >
+          <div className="p-3 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-900/20 group-hover:scale-105 transition-transform">
             <Activity className="text-white" size={28} />
           </div>
-          <div>
+          <div className="text-left">
             <h1 className="text-2xl font-bold bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">
               StracePerfDiff
             </h1>
             <p className="text-slate-500 text-sm">System Call Performance Analyzer</p>
           </div>
-        </div>
+        </button>
         <div className="flex gap-4">
             <div className="text-right">
                 <div className="text-xs text-slate-500 font-mono">Trace A</div>
@@ -132,6 +179,14 @@ const App: React.FC = () => {
       {traceA && traceB && (
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           
+          {/* PID Selector */}
+          <PidSelector 
+            allPids={allPids}
+            selectedPids={selectedPids}
+            onToggle={handlePidToggle}
+            onToggleAll={handlePidToggleAll}
+          />
+
           {/* Summary Stats Row */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <SummaryCard 
@@ -238,7 +293,7 @@ const App: React.FC = () => {
                         </div>
                     </div>
                 ) : (
-                    <DiffViewer diffRows={diffResult} />
+                    <DiffViewer diffRows={diffResult} selectedPids={selectedPids} />
                 )}
             </div>
           </div>

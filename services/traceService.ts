@@ -1,54 +1,184 @@
 import { TraceLine, TraceStats, ParsedTrace, DiffRow } from '../types';
 
-// Regex to parse: 21:55:34.211679 mmap(NULL, 8192, ...) = 0x... <0.000046>
-const STRACE_REGEX = /^(\d+:\d+:\d+\.\d+)\s+(\w+)\((.*)\)\s+=\s+(.+?)\s+<([\d\.]+)>/;
-
 const parseTimestamp = (ts: string): number => {
   const [h, m, s] = ts.split(':');
   return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000;
 };
 
 export const parseStrace = (content: string, filename: string): ParsedTrace => {
-  const lines: TraceLine[] = [];
   const rawLines = content.split('\n');
+  const lines: TraceLine[] = [];
   const syscallCounts: Record<string, { count: number; totalDuration: number }> = {};
+  const uniquePids = new Set<number>();
   
-  let startTime = 0;
-  let prevEndTime = 0;
+  // State for tracking timing per PID
+  const pidLastEndTime: Map<number, number> = new Map();
+  
+  // State for tracking unfinished calls: Map<PID, PartialLine>
+  const pendingCalls: Map<number, { 
+    timestampStr: string; 
+    startEpoch: number; 
+    syscall: string; 
+    startArgs: string; 
+    rawStart: string 
+  }> = new Map();
 
-  let validLineCount = 0;
+  let globalStartTime = 0;
+  let hasSetStartTime = false;
 
-  rawLines.forEach((raw, index) => {
-    const match = raw.match(STRACE_REGEX);
-    if (match) {
-      const [, timestampStr, syscall, args, result, durationStr] = match;
-      const currentEpoch = parseTimestamp(timestampStr);
-      const duration = parseFloat(durationStr);
+  rawLines.forEach((rawLine, index) => {
+    const trimmed = rawLine.trim();
+    if (!trimmed) return;
 
-      if (validLineCount === 0) {
-        startTime = currentEpoch;
-        prevEndTime = currentEpoch; // Assume starts immediately
+    // 1. Extract PID if present
+    // Format: "[pid 1234] 10:00:00 ..." or "10:00:00 ..."
+    let pid = 0; // Default PID 0 for single thread
+    let rest = trimmed;
+    
+    const pidMatch = rest.match(/^\[pid\s+(\d+)\]\s+(.*)/);
+    if (pidMatch) {
+      pid = parseInt(pidMatch[1]);
+      rest = pidMatch[2];
+    }
+
+    // Track PID
+    uniquePids.add(pid);
+
+    // 2. Extract Timestamp
+    // Format: "10:00:00.123456 syscall..."
+    const timeMatch = rest.match(/^(\d+:\d+:\d+\.\d+)\s+(.*)/);
+    if (!timeMatch) {
+       // Line might be a signal or exit message without timestamp in some formats, skip for now
+       return;
+    }
+
+    const timestampStr = timeMatch[1];
+    const body = timeMatch[2];
+    const currentEpoch = parseTimestamp(timestampStr);
+
+    if (!hasSetStartTime) {
+      globalStartTime = currentEpoch;
+      hasSetStartTime = true;
+    }
+    
+    // Initialize last end time for this PID if new
+    if (!pidLastEndTime.has(pid)) {
+      pidLastEndTime.set(pid, currentEpoch);
+    }
+
+    // 3. Analyze Body Type
+    
+    // Case A: Resumed Call
+    // Format: "<... syscall resumed> args) = result <duration>"
+    const resumeMatch = body.match(/^<\.\.\.\s+(\w+)\s+resumed>(.*)/);
+    if (resumeMatch) {
+      const syscallName = resumeMatch[1];
+      const resumeRest = resumeMatch[2]; // args) = result <duration>
+
+      // Find pending
+      const pending = pendingCalls.get(pid);
+      
+      // Note: strict matching of syscall name ensures we don't mix up threads if log is corrupted,
+      // though PID matching should be sufficient.
+      if (pending && pending.syscall === syscallName) {
+        // Complete the parsing
+        // resumeRest looks like: `) = 0 <0.000123>` or `chars", 10) = 10 <0.001>`
+        
+        // Reconstruct full raw string for display
+        const fullRaw = pending.rawStart + " ... " + rawLine;
+        
+        // Parse result and duration from resumeRest
+        // Regex: `(.*)\)\s+=\s+(.+?)\s+<([\d\.]+)`
+        const endMatch = resumeRest.match(/(.*)\)\s+=\s+(.+?)\s+<([\d\.]+)>/);
+        
+        if (endMatch) {
+           const extraArgs = endMatch[1]; // could be empty if unfinished line had all args
+           const result = endMatch[2];
+           const duration = parseFloat(endMatch[3]);
+           
+           const fullArgs = (pending.startArgs + extraArgs).trim();
+
+           // Calc user diff based on when the call *Started*
+           const prevEnd = pidLastEndTime.get(pid) || pending.startEpoch;
+           const userDiff = Math.max(0, pending.startEpoch - prevEnd);
+
+           // EndTime = currentEpoch (resume time)
+           pidLastEndTime.set(pid, currentEpoch);
+
+           const line: TraceLine = {
+             id: index,
+             pid,
+             timestamp: pending.timestampStr,
+             timestampEpoch: pending.startEpoch - globalStartTime,
+             syscall: syscallName,
+             args: fullArgs,
+             result,
+             duration,
+             userDiff: userDiff / 1000,
+             raw: fullRaw
+           };
+           
+           lines.push(line);
+           
+           // Cleanup
+           pendingCalls.delete(pid);
+           
+           // Stats
+            if (!syscallCounts[syscallName]) {
+                syscallCounts[syscallName] = { count: 0, totalDuration: 0 };
+            }
+            syscallCounts[syscallName].count++;
+            syscallCounts[syscallName].totalDuration += duration;
+        }
       }
+      return;
+    }
 
-      // User diff is the time elapsed since the previous syscall finished until this one started
-      let userDiff = 0;
-      if (validLineCount > 0) {
-        userDiff = Math.max(0, currentEpoch - prevEndTime);
-      }
+    // Case B: Unfinished Call
+    // Format: "syscall(args <unfinished ...>"
+    const unfinishedMatch = body.match(/^(\w+)\((.*)\s+<unfinished \.\.\.>/);
+    if (unfinishedMatch) {
+      const syscall = unfinishedMatch[1];
+      const startArgs = unfinishedMatch[2];
+      
+      pendingCalls.set(pid, {
+        timestampStr,
+        startEpoch: currentEpoch,
+        syscall,
+        startArgs,
+        rawStart: rawLine
+      });
+      return;
+    }
 
-      // Update prevEndTime for next iteration
-      prevEndTime = currentEpoch + (duration * 1000);
+    // Case C: Standard Call
+    // Format: "syscall(args) = result <duration>"
+    const standardMatch = body.match(/^(\w+)\((.*)\)\s+=\s+(.+?)\s+<([\d\.]+)>/);
+    if (standardMatch) {
+      const syscall = standardMatch[1];
+      const args = standardMatch[2];
+      const result = standardMatch[3];
+      const duration = parseFloat(standardMatch[4]);
+
+      const prevEnd = pidLastEndTime.get(pid) || currentEpoch;
+      const userDiff = Math.max(0, currentEpoch - prevEnd);
+
+      // Update end time: Start + Duration (approx) or next timestamp?
+      // Standard strace timestamp is start.
+      // So end is roughly currentEpoch + (duration * 1000)
+      pidLastEndTime.set(pid, currentEpoch + (duration * 1000));
 
       const line: TraceLine = {
         id: index,
+        pid,
         timestamp: timestampStr,
-        timestampEpoch: currentEpoch - startTime,
+        timestampEpoch: currentEpoch - globalStartTime,
         syscall,
         args,
         result,
         duration,
-        userDiff: userDiff / 1000, // Store in seconds to match duration
-        raw
+        userDiff: userDiff / 1000,
+        raw: rawLine
       };
 
       lines.push(line);
@@ -59,14 +189,20 @@ export const parseStrace = (content: string, filename: string): ParsedTrace => {
       }
       syscallCounts[syscall].count++;
       syscallCounts[syscall].totalDuration += duration;
-
-      validLineCount++;
     }
   });
 
+  // Sort lines by start timestamp to ensure chronological order 
+  // (since resumed lines appear later in file but action started earlier)
+  lines.sort((a, b) => a.timestampEpoch - b.timestampEpoch);
+
   const totalSysTime = lines.reduce((acc, l) => acc + l.duration, 0);
   const totalUserTime = lines.reduce((acc, l) => acc + l.userDiff, 0);
-  const totalWallTime = lines.length > 0 ? (lines[lines.length - 1].timestampEpoch / 1000) + lines[lines.length - 1].duration : 0;
+  
+  // Wall time is roughly End of last - Start of first
+  const totalWallTime = lines.length > 0 
+    ? (lines[lines.length - 1].timestampEpoch / 1000) + lines[lines.length - 1].duration 
+    : 0;
 
   return {
     filename,
@@ -77,7 +213,8 @@ export const parseStrace = (content: string, filename: string): ParsedTrace => {
       totalSysTime,
       totalUserTime,
       syscallCounts
-    }
+    },
+    pids: Array.from(uniquePids).sort((a, b) => a - b)
   };
 };
 

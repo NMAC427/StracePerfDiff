@@ -1,5 +1,6 @@
 export interface TraceLine {
   id: number;
+  pid?: number; // Process ID for strace -f
   timestamp: string; // Original string timestamp
   timestampEpoch: number; // Converted to relative ms from start
   syscall: string;
@@ -30,4 +31,5 @@ export interface ParsedTrace {
   filename: string;
   lines: TraceLine[];
   stats: TraceStats;
+  pids: number[]; // List of unique PIDs found in trace
 }

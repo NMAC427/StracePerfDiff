@@ -4,6 +4,7 @@ import { Clock, Cpu, AlertCircle, ChevronsRight, AlignLeft } from 'lucide-react'
 
 interface DiffViewerProps {
   diffRows: DiffRow[];
+  selectedPids: Set<number>;
 }
 
 // Helper to format small duration
@@ -15,7 +16,7 @@ const fmtTime = (s?: number) => {
   return s.toFixed(3) + 's';
 };
 
-const RowContent: React.FC<{ line?: TraceLine; highlight?: boolean; label: string }> = ({ line, highlight, label }) => {
+const RowContent: React.FC<{ line?: TraceLine; highlight?: boolean; label: string; showPid: boolean }> = ({ line, highlight, label, showPid }) => {
   if (!line) return <div className="h-full bg-slate-950/30" />;
 
   return (
@@ -24,7 +25,15 @@ const RowContent: React.FC<{ line?: TraceLine; highlight?: boolean; label: strin
       ${highlight ? 'border-rose-500 bg-rose-500/5' : 'border-slate-800 hover:bg-slate-800/30'}
     `}>
       <div className="flex items-center justify-between mb-1 opacity-70">
-        <span className="text-[10px] text-slate-500">{label} {line.timestamp}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-slate-500">{label}</span>
+          {showPid && line.pid !== undefined && line.pid > 0 && (
+            <span className="text-[9px] px-1 py-0.5 rounded bg-slate-800 text-slate-400">
+              PID {line.pid}
+            </span>
+          )}
+          <span className="text-[10px] text-slate-500">{line.timestamp}</span>
+        </div>
         <span className="text-[10px] text-slate-500">+{fmtTime(line.timestampEpoch/1000)}</span>
       </div>
       <div className="flex flex-wrap items-baseline gap-x-2">
@@ -45,13 +54,41 @@ const RowContent: React.FC<{ line?: TraceLine; highlight?: boolean; label: strin
   );
 };
 
-export const DiffViewer: React.FC<DiffViewerProps> = ({ diffRows }) => {
+export const DiffViewer: React.FC<DiffViewerProps> = ({ diffRows, selectedPids }) => {
   const [filterSlow, setFilterSlow] = useState(false);
 
   const displayRows = useMemo(() => {
-    if (!filterSlow) return diffRows.slice(0, 1000); // Limit render for perf in this demo
-    return diffRows.filter(r => (r.a?.duration || 0) > 0.001 || (r.b?.duration || 0) > 0.001).slice(0, 1000);
-  }, [diffRows, filterSlow]);
+    // Step 1: Filter by PID
+    const pidFiltered = diffRows.filter(r => {
+        // A row matches if:
+        // 1. It has an 'A' side and A's PID is selected
+        // 2. OR It has a 'B' side and B's PID is selected
+        // 3. Note: PID 0 is default.
+        
+        const pidA = r.a?.pid ?? 0;
+        const pidB = r.b?.pid ?? 0;
+        
+        const showA = r.a ? selectedPids.has(pidA) : false;
+        const showB = r.b ? selectedPids.has(pidB) : false;
+        
+        // If type is insert (only B), check B.
+        // If type is delete (only A), check A.
+        // If type match/mismatch, check either (usually same PID, but maybe not if aligned across threads?)
+        // Simplified: Show if any present side matches filter.
+        if (r.type === 'insert') return showB;
+        if (r.type === 'delete') return showA;
+        return showA || showB;
+    });
+
+    // Step 2: Filter Slow
+    if (!filterSlow) return pidFiltered.slice(0, 1000); 
+    
+    return pidFiltered.filter(r => (r.a?.duration || 0) > 0.001 || (r.b?.duration || 0) > 0.001).slice(0, 1000);
+  }, [diffRows, filterSlow, selectedPids]);
+
+  const showPid = useMemo(() => {
+      return diffRows.some(r => (r.a?.pid && r.a.pid > 0) || (r.b?.pid && r.b.pid > 0));
+  }, [diffRows]);
 
   return (
     <div className="flex flex-col h-full bg-slate-900 rounded-xl border border-slate-800 shadow-xl overflow-hidden">
@@ -62,7 +99,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ diffRows }) => {
             </div>
             <h3 className="font-semibold text-slate-200">Execution Flow Diff</h3>
             <span className="px-2 py-0.5 bg-slate-800 text-slate-400 text-xs rounded-full">
-                {diffRows.length} Ops
+                {displayRows.length} Ops shown
             </span>
         </div>
         <div className="flex items-center gap-3">
@@ -122,7 +159,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ diffRows }) => {
                 return (
                     <div key={idx} className={`grid grid-cols-12 border-b border-slate-800/50 min-h-[60px] ${bgClass}`}>
                         <div className="col-span-5">
-                             {row.type !== 'insert' && <RowContent line={row.a} label="A" highlight={row.type === 'delete'} />}
+                             {row.type !== 'insert' && <RowContent line={row.a} label="A" highlight={row.type === 'delete'} showPid={showPid} />}
                         </div>
                         
                         <div className="col-span-2 flex flex-col items-center justify-center gap-1 border-x border-slate-800/30 p-1">
@@ -131,7 +168,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ diffRows }) => {
                         </div>
 
                         <div className="col-span-5">
-                            {row.type !== 'delete' && <RowContent line={row.b} label="B" highlight={row.type === 'insert'} />}
+                            {row.type !== 'delete' && <RowContent line={row.b} label="B" highlight={row.type === 'insert'} showPid={showPid} />}
                         </div>
                     </div>
                 );

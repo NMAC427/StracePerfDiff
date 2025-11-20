@@ -1,8 +1,113 @@
-import { TraceLine, TraceStats, ParsedTrace, DiffRow } from '../types';
+
+import { TraceLine, TraceStats, ParsedTrace, DiffRow, TraceMode } from '../types';
 
 const parseTimestamp = (ts: string): number => {
+  // Strace format: HH:MM:SS.uuuuuu
   const [h, m, s] = ts.split(':');
   return (parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s)) * 1000;
+};
+
+const parsePerfTimestamp = (ts: string): number => {
+    // Perf format: Absolute seconds float (e.g. 673025301.272)
+    return parseFloat(ts) * 1.0;
+};
+
+export const parsePerfTrace = (content: string, filename: string): ParsedTrace => {
+    const rawLines = content.split('\n');
+    const lines: TraceLine[] = [];
+    const syscallCounts: Record<string, { count: number; totalDuration: number }> = {};
+    const uniquePids = new Set<number>();
+    const pidLastEndTime: Map<number, number> = new Map();
+
+    let globalStartTime = 0;
+    let hasSetStartTime = false;
+
+    // Regex for Perf Trace
+    // Example: 673025301.272 ( 0.002 ms): python/390838 brk() = 0x5fdfecd85000
+    // Groups: 
+    // 1: Timestamp (s)
+    // 2: Duration (ms)
+    // 3: Process Name
+    // 4: PID
+    // 5: Syscall
+    // 6: Args (content inside parens)
+    // 7: Result
+    const perfRegex = /^(\d+\.\d+)\s+\(\s*([\d\.]+)\s+ms\):\s+(.+?)\/(\d+)\s+(\w+)\((.*)\)\s+=\s+(.*)$/;
+
+    rawLines.forEach((rawLine, index) => {
+        const trimmed = rawLine.trim();
+        if (!trimmed) return;
+        
+        const match = trimmed.match(perfRegex);
+        if (!match) return;
+
+        const tsStr = match[1];
+        const durationMs = parseFloat(match[2]);
+        const pid = parseInt(match[4]);
+        const syscall = match[5];
+        const args = match[6];
+        const result = match[7];
+
+        const currentEpoch = parsePerfTimestamp(tsStr); // in ms
+        const durationSec = durationMs / 1000;
+
+        if (!hasSetStartTime) {
+            globalStartTime = currentEpoch;
+            hasSetStartTime = true;
+        }
+
+        uniquePids.add(pid);
+
+        // Calc user diff (gap from prev end)
+        // Note: Perf timestamp is typically start time.
+        const prevEnd = pidLastEndTime.get(pid) || currentEpoch;
+        const userDiff = Math.max(0, currentEpoch - prevEnd); // in ms
+
+        // Update end time
+        pidLastEndTime.set(pid, currentEpoch + durationMs);
+
+        const line: TraceLine = {
+            id: index,
+            pid,
+            timestamp: tsStr, // Keep original format string
+            timestampEpoch: currentEpoch - globalStartTime, // Relative to start
+            syscall,
+            args,
+            result,
+            duration: durationSec,
+            userDiff: userDiff / 1000, // Store as seconds
+            raw: rawLine
+        };
+
+        lines.push(line);
+
+        // Stats
+        if (!syscallCounts[syscall]) {
+            syscallCounts[syscall] = { count: 0, totalDuration: 0 };
+        }
+        syscallCounts[syscall].count++;
+        syscallCounts[syscall].totalDuration += durationSec;
+    });
+
+    const totalSysTime = lines.reduce((acc, l) => acc + l.duration, 0);
+    const totalUserTime = lines.reduce((acc, l) => acc + l.userDiff, 0);
+    
+    const totalWallTime = lines.length > 0 
+      ? (lines[lines.length - 1].timestampEpoch / 1000) + lines[lines.length - 1].duration 
+      : 0;
+
+    return {
+        filename,
+        lines,
+        stats: {
+            totalLines: lines.length,
+            totalWallTime,
+            totalSysTime,
+            totalUserTime,
+            syscallCounts
+        },
+        pids: Array.from(uniquePids).sort((a, b) => a - b)
+    };
 };
 
 export const parseStrace = (content: string, filename: string): ParsedTrace => {
@@ -218,6 +323,13 @@ export const parseStrace = (content: string, filename: string): ParsedTrace => {
   };
 };
 
+export const parseTrace = (content: string, filename: string, mode: TraceMode): ParsedTrace => {
+    if (mode === 'perf') {
+        return parsePerfTrace(content, filename);
+    }
+    return parseStrace(content, filename);
+};
+
 // --- Alignment Helpers ---
 
 // Simple Levenshtein for short strings (syscall names or filenames)
@@ -261,6 +373,9 @@ const getArgSimilarity = (a: string, b: string): number => {
   // Path heuristic: extract first quoted string containing a slash
   // e.g. openat(..., "/usr/lib/locale/locale-archive", ...)
   // matches "/usr/lib/locale/locale-archive"
+  // Perf trace args might look like: filename: 0x..., or just args
+  // Strace args look like: "string", ...
+  
   const pathRegex = /"([^"]*\/[^"]*)"/;
   const matchA = a.match(pathRegex);
   const matchB = b.match(pathRegex);

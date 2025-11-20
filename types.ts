@@ -1,3 +1,6 @@
+
+export type TraceMode = 'strace' | 'perf';
+
 export interface TraceLine {
   id: number;
   pid?: number; // Process ID for strace -f

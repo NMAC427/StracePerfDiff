@@ -1,11 +1,12 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
-import { Activity, Zap, BarChart2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Activity, Zap, BarChart2, ChevronDown, ChevronUp, FileCode, Terminal } from 'lucide-react';
 import { FileUpload } from './components/FileUpload';
 import { SummaryCard } from './components/SummaryCard';
 import { DiffViewer } from './components/DiffViewer';
 import { PidSelector } from './components/PidSelector';
-import { parseStrace, alignTraces } from './services/traceService';
-import { ParsedTrace, DiffRow } from './types';
+import { parseTrace, alignTraces } from './services/traceService';
+import { ParsedTrace, DiffRow, TraceMode } from './types';
 import {
   BarChart,
   Bar,
@@ -18,6 +19,7 @@ import {
 } from 'recharts';
 
 const App: React.FC = () => {
+  const [traceMode, setTraceMode] = useState<TraceMode>('strace');
   const [traceA, setTraceA] = useState<ParsedTrace | null>(null);
   const [traceB, setTraceB] = useState<ParsedTrace | null>(null);
   const [diffResult, setDiffResult] = useState<DiffRow[]>([]);
@@ -27,12 +29,12 @@ const App: React.FC = () => {
   const [selectedPids, setSelectedPids] = useState<Set<number>>(new Set());
 
   const handleFileA = (content: string, name: string) => {
-    const parsed = parseStrace(content, name);
+    const parsed = parseTrace(content, name, traceMode);
     setTraceA(parsed);
   };
 
   const handleFileB = (content: string, name: string) => {
-    const parsed = parseStrace(content, name);
+    const parsed = parseTrace(content, name, traceMode);
     setTraceB(parsed);
   };
 
@@ -149,28 +151,67 @@ const App: React.FC = () => {
 
       {/* File Inputs */}
       {(!traceA || !traceB) && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1 items-center justify-center max-w-4xl mx-auto w-full py-12">
-          <div className="space-y-4">
-             <h2 className="text-xl font-semibold text-slate-300 flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-xs">A</span>
-                Baseline Trace
-             </h2>
-             <FileUpload 
-               label="Upload Trace A (strace output)" 
-               onFileSelect={handleFileA} 
-               fileName={traceA?.filename}
-             />
+        <div className="flex flex-col gap-8 max-w-4xl mx-auto w-full py-8">
+          
+          {/* Trace Mode Selector */}
+          <div className="flex justify-center">
+            <div className="bg-slate-900 p-1 rounded-xl border border-slate-800 inline-flex">
+                <button 
+                    onClick={() => setTraceMode('strace')}
+                    className={`
+                        flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-medium transition-all
+                        ${traceMode === 'strace' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}
+                    `}
+                >
+                    <Terminal size={16} />
+                    strace Mode
+                </button>
+                <button 
+                    onClick={() => setTraceMode('perf')}
+                    className={`
+                        flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-medium transition-all
+                        ${traceMode === 'perf' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}
+                    `}
+                >
+                    <FileCode size={16} />
+                    perf trace Mode
+                </button>
+            </div>
           </div>
-          <div className="space-y-4">
-             <h2 className="text-xl font-semibold text-slate-300 flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-xs">B</span>
-                Comparison Trace
-             </h2>
-             <FileUpload 
-               label="Upload Trace B (strace output)" 
-               onFileSelect={handleFileB} 
-               fileName={traceB?.filename}
-             />
+
+          {/* Helper Text */}
+          <div className="text-center space-y-2">
+            <p className="text-slate-400 text-sm">
+                {traceMode === 'strace' 
+                    ? <span>Run <code>strace -f -tt -T -o trace.log -- ./your-program</code> to generate a compatible file.</span>
+                    : <span>Run <code>perf trace --syscalls -T -F -o trace.log -- ./your-program</code> to generate a compatible file.</span>
+                }
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-4">
+                <h2 className="text-xl font-semibold text-slate-300 flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-xs">A</span>
+                    Baseline Trace
+                </h2>
+                <FileUpload 
+                label={`Upload Trace A (${traceMode} output)`}
+                onFileSelect={handleFileA} 
+                fileName={traceA?.filename}
+                />
+            </div>
+            <div className="space-y-4">
+                <h2 className="text-xl font-semibold text-slate-300 flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-xs">B</span>
+                    Comparison Trace
+                </h2>
+                <FileUpload 
+                label={`Upload Trace B (${traceMode} output)`}
+                onFileSelect={handleFileB} 
+                fileName={traceB?.filename}
+                />
+            </div>
           </div>
         </div>
       )}

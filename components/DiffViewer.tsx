@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo } from 'react';
 import { DiffRow, TraceLine } from '../types';
 import { Clock, Cpu, AlertCircle, ChevronsRight, AlignLeft } from 'lucide-react';
@@ -19,6 +20,9 @@ const fmtTime = (s?: number) => {
 const RowContent: React.FC<{ line?: TraceLine; highlight?: boolean; label: string; showPid: boolean }> = ({ line, highlight, label, showPid }) => {
   if (!line) return <div className="h-full bg-slate-950/30" />;
 
+  // Check if result indicates error (usually starts with - or is ?)
+  const isError = line.result.startsWith('-') || line.result.startsWith('?');
+
   return (
     <div className={`
       flex flex-col px-3 py-2 text-xs font-mono border-l-2 h-full
@@ -39,6 +43,9 @@ const RowContent: React.FC<{ line?: TraceLine; highlight?: boolean; label: strin
       <div className="flex flex-wrap items-baseline gap-x-2">
         <span className="font-bold text-indigo-300">{line.syscall}</span>
         <span className="text-slate-400 break-all whitespace-pre-wrap leading-relaxed" title={line.args}>{line.args}</span>
+        <span className={`whitespace-nowrap ${isError ? 'text-rose-400 font-semibold' : 'text-slate-500'}`}>
+           = {line.result}
+        </span>
       </div>
       <div className="flex items-center justify-end gap-3 mt-2">
         <div className="flex items-center gap-1 text-slate-500" title="Wait time before syscall (User CPU time)">
